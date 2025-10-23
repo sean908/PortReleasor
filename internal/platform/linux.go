@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os"
@@ -16,10 +17,61 @@ import (
 )
 
 // LinuxManager Linux平台实现
-type LinuxManager struct{}
+type LinuxManager struct {
+	processNameCache map[int]string
+}
+
+// initProcessCache 初始化进程缓存
+func (lm *LinuxManager) initProcessCache() {
+	if lm.processNameCache == nil {
+		lm.processNameCache = make(map[int]string)
+	}
+}
+
+// getAllProcessNames 批量获取所有进程名称
+func (lm *LinuxManager) getAllProcessNames() error {
+	lm.initProcessCache()
+
+	cmd := exec.Command("ps", "-axo", "pid,comm")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to execute ps: %v", err)
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(out.String()))
+	// Skip header line
+	if scanner.Scan() {
+		// Skip header
+	}
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			pidStr := fields[0]
+			name := fields[1]
+			if pid, err := strconv.Atoi(pidStr); err == nil {
+				lm.processNameCache[pid] = name
+			}
+		}
+	}
+
+	return nil
+}
 
 // GetPortConnections 获取Linux系统端口连接信息
 func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
+	// 首先批量获取所有进程信息
+	if err := lm.getAllProcessNames(); err != nil {
+		return nil, fmt.Errorf("failed to get process names: %v", err)
+	}
+
 	cmd := exec.Command("ss", "-tunlp")
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -32,6 +84,7 @@ func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
 	lines := strings.Split(out.String(), "\n")
 
 	re := regexp.MustCompile(`\s+`)
+	portMap := make(map[string]types.PortInfo) // key: "port:protocol"
 
 	for i, line := range lines {
 		if i == 0 {
@@ -70,18 +123,35 @@ func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
 			pidMatch := regexp.MustCompile(`pid=(\d+)`).FindStringSubmatch(processInfo)
 			if len(pidMatch) > 1 {
 				pid, _ = strconv.Atoi(pidMatch[1])
-				processName = lm.getProcessName(pid)
+				processName = lm.getProcessNameFromCache(pid)
 			}
 		}
 
-		connections = append(connections, types.PortInfo{
+		key := fmt.Sprintf("%d:%s", port, protocol)
+
+		// 创建新的端口信息
+		newInfo := types.PortInfo{
 			Port:        port,
 			Protocol:    protocol,
 			PID:         pid,
 			ProcessName: processName,
 			LocalAddr:   localAddr,
 			State:       "LISTENING",
-		})
+		}
+
+		// 检查是否已存在该端口的记录
+		if _, exists := portMap[key]; exists {
+			// 保持现有的记录（ss 通常不会重复显示监听端口）
+			continue
+		} else {
+			// 如果不存在，直接添加
+			portMap[key] = newInfo
+		}
+	}
+
+	// 将 map 转换为 slice
+	for _, info := range portMap {
+		connections = append(connections, info)
 	}
 
 	return connections, nil
@@ -156,7 +226,17 @@ func (lm *LinuxManager) getPortConnectionsWithNetstat() ([]types.PortInfo, error
 	return connections, nil
 }
 
-// getProcessName 获取进程名称
+// getProcessNameFromCache 从缓存获取进程名称
+func (lm *LinuxManager) getProcessNameFromCache(pid int) string {
+	lm.initProcessCache()
+	if name, exists := lm.processNameCache[pid]; exists {
+		return name
+	}
+	// 备用方案：从 /proc 读取
+	return lm.getProcessName(pid)
+}
+
+// getProcessName 获取进程名称（备用方案）
 func (lm *LinuxManager) getProcessName(pid int) string {
 	cmdPath := fmt.Sprintf("/proc/%d/comm", pid)
 	data, err := os.ReadFile(cmdPath)
