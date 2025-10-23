@@ -95,6 +95,7 @@ func (wm *WindowsManager) GetPortConnections() ([]types.PortInfo, error) {
 	lines := strings.Split(out.String(), "\n")
 
 	re := regexp.MustCompile(`\s+`)
+	portMap := make(map[string]types.PortInfo) // key: "port:protocol"
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -146,15 +147,34 @@ func (wm *WindowsManager) GetPortConnections() ([]types.PortInfo, error) {
 		}
 
 		processName := wm.getProcessNameFromCache(pid)
+		key := fmt.Sprintf("%d:%s", port, protocol)
 
-		connections = append(connections, types.PortInfo{
+		// 创建新的端口信息
+		newInfo := types.PortInfo{
 			Port:        port,
 			Protocol:    protocol,
 			PID:         pid,
 			ProcessName: processName,
 			LocalAddr:   localAddr,
 			State:       state,
-		})
+		}
+
+		// 检查是否已存在该端口的记录
+		if _, exists := portMap[key]; exists {
+			// 如果新连接是 LISTENING 状态，优先使用
+			if state == "LISTENING" {
+				portMap[key] = newInfo
+			}
+			// 否则保持现有的记录
+		} else {
+			// 如果不存在，直接添加
+			portMap[key] = newInfo
+		}
+	}
+
+	// 将 map 转换为 slice
+	for _, info := range portMap {
+		connections = append(connections, info)
 	}
 
 	return connections, nil

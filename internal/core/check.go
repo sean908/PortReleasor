@@ -82,7 +82,7 @@ func CheckPorts(patterns []string, verbose bool, wildcard bool) error {
 		}
 	}
 
-	fmt.Printf("\nTotal: %d connection(s)\n", len(filtered))
+	fmt.Printf("\nShowing %d unique port(s)\n", len(filtered))
 
 	return nil
 }
