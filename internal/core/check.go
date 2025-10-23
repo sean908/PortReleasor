@@ -61,24 +61,69 @@ func CheckPorts(patterns []string, verbose bool, wildcard bool) error {
 		}
 	}
 
-	fmt.Println("PORT/PROTOCOL\tPID\tPROCESS" + func() string {
-		if verbose {
-			return "\tPATH"
-		}
-		return ""
-	}())
-	fmt.Println(strings.Repeat("-", func() int {
-		if verbose {
-			return 80
-		}
-		return 40
-	}()))
+	// 使用固定宽度格式化输出
+	portProtocolWidth := 15
+	pidWidth := 8
+	processWidth := 20
+	pathWidth := 40
 
+	// 动态调整列宽以适应实际数据
+	for _, conn := range filtered {
+		portProtocol := fmt.Sprintf("%d/%s", conn.Port, conn.Protocol)
+		if len(portProtocol) > portProtocolWidth {
+			portProtocolWidth = len(portProtocol)
+		}
+		pidStr := fmt.Sprintf("%d", conn.PID)
+		if len(pidStr) > pidWidth {
+			pidWidth = len(pidStr)
+		}
+		if len(conn.ProcessName) > processWidth {
+			processWidth = len(conn.ProcessName)
+		}
+		if verbose && len(conn.ProcessPath) > pathWidth {
+			pathWidth = len(conn.ProcessPath)
+		}
+	}
+
+	// 添加适当的间距
+	portProtocolWidth += 2
+	pidWidth += 2
+	processWidth += 2
+	pathWidth += 2
+
+	// 打印表头
+	if verbose {
+		header := fmt.Sprintf("%-*s %-*s %-*s %s",
+			portProtocolWidth, "PORT/PROTOCOL",
+			pidWidth, "PID",
+			processWidth, "PROCESS",
+			"PATH")
+		fmt.Println(header)
+		fmt.Println(strings.Repeat("-", portProtocolWidth+pidWidth+processWidth+pathWidth+3))
+	} else {
+		header := fmt.Sprintf("%-*s %-*s %s",
+			portProtocolWidth, "PORT/PROTOCOL",
+			pidWidth, "PID",
+			"PROCESS")
+		fmt.Println(header)
+		fmt.Println(strings.Repeat("-", portProtocolWidth+pidWidth+processWidth+2))
+	}
+
+	// 打印数据行
 	for _, conn := range filtered {
 		if verbose {
-			fmt.Println(conn.String())
+			line := fmt.Sprintf("%-*s %-*d %-*s %s",
+				portProtocolWidth, fmt.Sprintf("%d/%s", conn.Port, conn.Protocol),
+				pidWidth, conn.PID,
+				processWidth, conn.ProcessName,
+				conn.ProcessPath)
+			fmt.Println(line)
 		} else {
-			fmt.Printf("%d/%s\t%d\t%s\n", conn.Port, conn.Protocol, conn.PID, conn.ProcessName)
+			line := fmt.Sprintf("%-*s %-*d %s",
+				portProtocolWidth, fmt.Sprintf("%d/%s", conn.Port, conn.Protocol),
+				pidWidth, conn.PID,
+				conn.ProcessName)
+			fmt.Println(line)
 		}
 	}
 

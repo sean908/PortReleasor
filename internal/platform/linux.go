@@ -56,8 +56,22 @@ func (lm *LinuxManager) getAllProcessNames() error {
 		if len(fields) >= 2 {
 			pidStr := fields[0]
 			name := fields[1]
-			if pid, err := strconv.Atoi(pidStr); err == nil {
-				lm.processNameCache[pid] = name
+
+			// 处理WSL中可能被截断的进程名
+			if len(name) > 15 && strings.Contains(name, "(") {
+				// 可能是截断的进程名，尝试获取完整名称
+				if pid, err := strconv.Atoi(pidStr); err == nil {
+					fullName := lm.getProcessName(pid)
+					if fullName != "" && fullName != "Unknown" {
+						lm.processNameCache[pid] = fullName
+					} else {
+						lm.processNameCache[pid] = name
+					}
+				}
+			} else {
+				if pid, err := strconv.Atoi(pidStr); err == nil {
+					lm.processNameCache[pid] = name
+				}
 			}
 		}
 	}
@@ -97,13 +111,22 @@ func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
 		}
 
 		fields := re.Split(line, -1)
-		if len(fields) < 5 {
+
+		// Handle WSL/ss output format variations
+		if len(fields) < 4 {
 			continue
 		}
 
 		protocol := strings.ToUpper(fields[0])
-		localAddr := fields[4]
+		state := fields[1]
+		var localAddr string
+		if len(fields) > 4 {
+			localAddr = fields[4]
+		} else {
+			localAddr = fields[3]
+		}
 
+		// Extract port from local address
 		parts := strings.Split(localAddr, ":")
 		if len(parts) < 2 {
 			continue
@@ -118,13 +141,25 @@ func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
 		var pid int
 		var processName string
 
+		// Check if we have process info (WSL/ss might not show Process column)
 		if len(fields) >= 6 {
-			processInfo := fields[5]
-			pidMatch := regexp.MustCompile(`pid=(\d+)`).FindStringSubmatch(processInfo)
-			if len(pidMatch) > 1 {
-				pid, _ = strconv.Atoi(pidMatch[1])
-				processName = lm.getProcessNameFromCache(pid)
+			for j := 5; j < len(fields); j++ {
+				processInfo := fields[j]
+				if strings.Contains(processInfo, "pid=") {
+					pidMatch := regexp.MustCompile(`pid=(\d+)`).FindStringSubmatch(processInfo)
+					if len(pidMatch) > 1 {
+						pid, _ = strconv.Atoi(pidMatch[1])
+						processName = lm.getProcessNameFromCache(pid)
+						break
+					}
+				}
 			}
+		}
+
+		// If no PID found, try to infer from state or use alternative method
+		if pid == 0 && strings.Contains(state, "LISTEN") {
+			// For listening ports without PID info, try alternative detection
+			pid, processName = lm.findProcessForPort(port, protocol)
 		}
 
 		key := fmt.Sprintf("%d:%s", port, protocol)
@@ -155,6 +190,132 @@ func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
 	}
 
 	return connections, nil
+}
+
+// findProcessForPort 通过其他方法查找使用指定端口的进程
+func (lm *LinuxManager) findProcessForPort(port int, protocol string) (int, string) {
+	// 尝试使用lsof命令
+	cmd := exec.Command("lsof", "-i", fmt.Sprintf(":%d", port))
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	if err := cmd.Run(); err == nil {
+		lines := strings.Split(out.String(), "\n")
+		if len(lines) > 1 {
+			// 跳过标题行
+			for _, line := range lines[1:] {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					// lsof输出格式: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+					pidStr := fields[1]
+					processName := fields[0]
+					if pid, err := strconv.Atoi(pidStr); err == nil {
+						return pid, processName
+					}
+				}
+			}
+		}
+	}
+
+	// 如果lsof不可用，尝试解析/proc/net/tcp和udp
+	return lm.findProcessFromProcNet(port, protocol)
+}
+
+// findProcessFromProcNet 从/proc/net中查找进程信息
+func (lm *LinuxManager) findProcessFromProcNet(port int, protocol string) (int, string) {
+	var filename string
+	if strings.ToUpper(protocol) == "TCP" {
+		filename = "/proc/net/tcp"
+	} else if strings.ToUpper(protocol) == "UDP" {
+		filename = "/proc/net/udp"
+	} else {
+		return 0, ""
+	}
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return 0, ""
+	}
+
+	lines := strings.Split(string(data), "\n")
+	portHex := fmt.Sprintf("%04X", port)
+
+	for i, line := range lines {
+		if i == 0 || line == "" {
+			continue // Skip header
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			continue
+		}
+
+		// 检查本地地址端口是否匹配
+		localAddr := fields[1]
+		if strings.HasSuffix(localAddr, ":"+portHex) {
+			// 从inode字段查找进程
+			inode := fields[9]
+			return lm.findProcessByInode(inode)
+		}
+	}
+
+	return 0, ""
+}
+
+// findProcessByInode 通过inode查找进程
+func (lm *LinuxManager) findProcessByInode(inode string) (int, string) {
+	if inode == "0" {
+		return 0, ""
+	}
+
+	// 遍历/proc/[pid]/fd目录查找socket链接
+	procDir, err := os.Open("/proc")
+	if err != nil {
+		return 0, ""
+	}
+	defer procDir.Close()
+
+	entries, err := procDir.Readdirnames(-1)
+	if err != nil {
+		return 0, ""
+	}
+
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry)
+		if err != nil {
+			continue // 不是数字目录，跳过
+		}
+
+		fdDir := fmt.Sprintf("/proc/%d/fd", pid)
+		fdEntries, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+
+		for _, fdEntry := range fdEntries {
+			linkPath := fmt.Sprintf("%s/%s", fdDir, fdEntry.Name())
+			linkTarget, err := os.Readlink(linkPath)
+			if err != nil {
+				continue
+			}
+
+			// 检查是否是socket且inode匹配
+			if strings.HasPrefix(linkTarget, "socket:[") && strings.Contains(linkTarget, inode) {
+				processName := lm.getProcessNameFromCache(pid)
+				if processName == "" {
+					processName = lm.getProcessName(pid)
+				}
+				return pid, processName
+			}
+		}
+	}
+
+	return 0, ""
 }
 
 // getPortConnectionsWithNetstat 使用netstat作为备用方案
@@ -206,10 +367,15 @@ func (lm *LinuxManager) getPortConnectionsWithNetstat() ([]types.PortInfo, error
 
 		if len(fields) >= 7 {
 			processInfo := fields[6]
-			pidMatch := regexp.MustCompile(`(\d+)/(.+)`).FindStringSubmatch(processInfo)
-			if len(pidMatch) > 2 {
-				pid, _ = strconv.Atoi(pidMatch[1])
-				processName = pidMatch[2]
+			if processInfo != "-" {
+				pidMatch := regexp.MustCompile(`(\d+)/(.+)`).FindStringSubmatch(processInfo)
+				if len(pidMatch) > 2 {
+					pid, _ = strconv.Atoi(pidMatch[1])
+					processName = pidMatch[2]
+				}
+			} else {
+				// netstat显示"-"表示无法获取PID信息，尝试其他方法
+				pid, processName = lm.findProcessForPort(port, protocol)
 			}
 		}
 

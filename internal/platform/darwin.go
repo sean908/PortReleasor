@@ -100,7 +100,7 @@ func (dm *DarwinManager) GetPortConnections() ([]types.PortInfo, error) {
 
 		processName := fields[0]
 		pidStr := fields[1]
-		protocol := strings.ToUpper(fields[4])
+		protocol := strings.ToUpper(fields[7])
 		address := fields[8]
 
 		// 提取端口号
