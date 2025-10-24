@@ -132,6 +132,9 @@ func (dm *DarwinManager) GetPortConnections() ([]types.PortInfo, error) {
 			processName = cachedName
 		}
 
+		// 提取进程名称和完整路径
+		displayName, fullPath := dm.extractProcessNameAndPath(processName)
+
 		key := fmt.Sprintf("%d:%s", port, protocol)
 
 		// 创建新的端口信息
@@ -139,7 +142,8 @@ func (dm *DarwinManager) GetPortConnections() ([]types.PortInfo, error) {
 			Port:        port,
 			Protocol:    protocol,
 			PID:         pid,
-			ProcessName: processName,
+			ProcessName: displayName,
+			ProcessPath: fullPath,
 			LocalAddr:   address,
 			State:       "LISTENING",
 		}
@@ -160,6 +164,23 @@ func (dm *DarwinManager) GetPortConnections() ([]types.PortInfo, error) {
 	}
 
 	return connections, nil
+}
+
+// extractProcessNameAndPath 从完整路径中提取进程名称和路径
+func (dm *DarwinManager) extractProcessNameAndPath(fullPath string) (string, string) {
+	if fullPath == "" {
+		return "", ""
+	}
+
+	// 如果路径中包含斜杠，提取最后一个部分作为进程名
+	if strings.Contains(fullPath, "/") {
+		parts := strings.Split(fullPath, "/")
+		name := parts[len(parts)-1]
+		return name, fullPath
+	}
+
+	// 如果没有斜杠，说明本身就不是路径，直接返回
+	return fullPath, ""
 }
 
 // getProcessNameFromCache 从缓存获取进程名称

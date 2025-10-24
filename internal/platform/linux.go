@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,6 +20,8 @@ import (
 // LinuxManager Linux平台实现
 type LinuxManager struct {
 	processNameCache map[int]string
+	processPathCache map[int]string
+	isRoot          bool
 }
 
 // initProcessCache 初始化进程缓存
@@ -26,10 +29,17 @@ func (lm *LinuxManager) initProcessCache() {
 	if lm.processNameCache == nil {
 		lm.processNameCache = make(map[int]string)
 	}
+	if lm.processPathCache == nil {
+		lm.processPathCache = make(map[int]string)
+	}
+	// 检测是否为root用户
+	if currentUser, err := user.Current(); err == nil {
+		lm.isRoot = currentUser.Uid == "0"
+	}
 }
 
-// getAllProcessNames 批量获取所有进程名称
-func (lm *LinuxManager) getAllProcessNames() error {
+// getAllProcessInfo 批量获取所有进程信息（名称和路径）
+func (lm *LinuxManager) getAllProcessInfo() error {
 	lm.initProcessCache()
 
 	cmd := exec.Command("ps", "-axo", "pid,comm")
@@ -67,10 +77,14 @@ func (lm *LinuxManager) getAllProcessNames() error {
 					} else {
 						lm.processNameCache[pid] = name
 					}
+					// 尝试获取进程路径
+					lm.cacheProcessPath(pid)
 				}
 			} else {
 				if pid, err := strconv.Atoi(pidStr); err == nil {
 					lm.processNameCache[pid] = name
+					// 尝试获取进程路径
+					lm.cacheProcessPath(pid)
 				}
 			}
 		}
@@ -82,8 +96,8 @@ func (lm *LinuxManager) getAllProcessNames() error {
 // GetPortConnections 获取Linux系统端口连接信息
 func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
 	// 首先批量获取所有进程信息
-	if err := lm.getAllProcessNames(); err != nil {
-		return nil, fmt.Errorf("failed to get process names: %v", err)
+	if err := lm.getAllProcessInfo(); err != nil {
+		return nil, fmt.Errorf("failed to get process info: %v", err)
 	}
 
 	cmd := exec.Command("ss", "-tunlp")
@@ -164,12 +178,16 @@ func (lm *LinuxManager) GetPortConnections() ([]types.PortInfo, error) {
 
 		key := fmt.Sprintf("%d:%s", port, protocol)
 
+		// 获取进程路径
+		processPath := lm.getProcessPathWithPermissionCheck(pid)
+
 		// 创建新的端口信息
 		newInfo := types.PortInfo{
 			Port:        port,
 			Protocol:    protocol,
 			PID:         pid,
 			ProcessName: processName,
+			ProcessPath: processPath,
 			LocalAddr:   localAddr,
 			State:       "LISTENING",
 		}
@@ -384,12 +402,63 @@ func (lm *LinuxManager) getPortConnectionsWithNetstat() ([]types.PortInfo, error
 			Protocol:    protocol,
 			PID:         pid,
 			ProcessName: processName,
+			ProcessPath: lm.getProcessPathWithPermissionCheck(pid),
 			LocalAddr:   localAddr,
 			State:       "LISTENING",
 		})
 	}
 
 	return connections, nil
+}
+
+// cacheProcessPath 缓存进程路径
+func (lm *LinuxManager) cacheProcessPath(pid int) {
+	if path := lm.getProcessPathFromCache(pid); path == "" {
+		// 尝试从/proc/pid/exe获取路径
+		exePath := fmt.Sprintf("/proc/%d/exe", pid)
+		if path, err := os.Readlink(exePath); err == nil {
+			lm.processPathCache[pid] = path
+		}
+	}
+}
+
+// getProcessPathFromCache 从缓存获取进程路径
+func (lm *LinuxManager) getProcessPathFromCache(pid int) string {
+	lm.initProcessCache()
+	if path, exists := lm.processPathCache[pid]; exists {
+		return path
+	}
+	return ""
+}
+
+// getProcessPathWithPermissionCheck 根据权限检查获取进程路径显示文本
+func (lm *LinuxManager) getProcessPathWithPermissionCheck(pid int) string {
+	// PID为0的情况
+	if pid == 0 {
+		if lm.isRoot {
+			return "N/A"
+		} else {
+			return "NO PERMISSION"
+		}
+	}
+
+	// 尝试从缓存获取路径
+	if path := lm.getProcessPathFromCache(pid); path != "" {
+		return path
+	}
+
+	// 尝试实时获取路径
+	exePath := fmt.Sprintf("/proc/%d/exe", pid)
+	if path, err := os.Readlink(exePath); err == nil {
+		return path
+	}
+
+	// 无法获取路径，检查权限
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); os.IsNotExist(err) {
+		return "PROCESS NOT FOUND"
+	}
+
+	return "NO PERMISSION"
 }
 
 // getProcessNameFromCache 从缓存获取进程名称
