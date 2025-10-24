@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  # 版本提取 job
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+    steps:
+    - name: Get version
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            asset_name: prls-windows-amd64.exe
+          - goos: darwin
+            goarch: amd64
+            asset_name: prls-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            asset_name: prls-darwin-arm64  # 添加 macOS ARM64
+          - goos: linux
+            goarch: amd64
+            asset_name: prls-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset_name: prls-linux-arm64
+          - goos: windows
+            goarch: arm64
+            asset_name: prls-windows-arm64.exe
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
+      run: |
+        go build -ldflags="-s -w -X main.Version=${{ needs.version.outputs.version }}" -o ${{ matrix.asset_name }}
+
+    - name: Generate checksums
+      run: |
+        sha256sum ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
+        md5sum ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.md5
+        sha512sum ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha512
+
+    - name: Get file size
+      id: filesize
+      run: |
+        SIZE=$(ls -lh ${{ matrix.asset_name }} | awk '{print $5}')
+        echo "size=$SIZE" >> $GITHUB_OUTPUT
+        echo "${{ matrix.asset_name }}|$SIZE" > ${{ matrix.asset_name }}.size
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.goos }}-${{ matrix.goarch }}
+        path: |
+          ${{ matrix.asset_name }}
+          ${{ matrix.asset_name }}.sha256
+          ${{ matrix.asset_name }}.md5
+          ${{ matrix.asset_name }}.sha512
+          ${{ matrix.asset_name }}.size
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Display structure (debugging)
+      run: find artifacts -type f -ls
+
+    - name: Collect file sizes
+      id: sizes
+      run: |
+        # 读取所有 .size 文件并提取大小信息
+        WIN_AMD64=$(cat artifacts/windows-amd64/prls-windows-amd64.exe.size | cut -d'|' -f2 || echo "N/A")
+        WIN_ARM64=$(cat artifacts/windows-arm64/prls-windows-arm64.exe.size | cut -d'|' -f2 || echo "N/A")
+        DARWIN_AMD64=$(cat artifacts/darwin-amd64/prls-darwin-amd64.size | cut -d'|' -f2 || echo "N/A")
+        DARWIN_ARM64=$(cat artifacts/darwin-arm64/prls-darwin-arm64.size | cut -d'|' -f2 || echo "N/A")
+        LINUX_AMD64=$(cat artifacts/linux-amd64/prls-linux-amd64.size | cut -d'|' -f2 || echo "N/A")
+        LINUX_ARM64=$(cat artifacts/linux-arm64/prls-linux-arm64.size | cut -d'|' -f2 || echo "N/A")
+        
+        echo "win_amd64=$WIN_AMD64" >> $GITHUB_OUTPUT
+        echo "win_arm64=$WIN_ARM64" >> $GITHUB_OUTPUT
+        echo "darwin_amd64=$DARWIN_AMD64" >> $GITHUB_OUTPUT
+        echo "darwin_arm64=$DARWIN_ARM64" >> $GITHUB_OUTPUT
+        echo "linux_amd64=$LINUX_AMD64" >> $GITHUB_OUTPUT
+        echo "linux_arm64=$LINUX_ARM64" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: artifacts/**/*
+        generate_release_notes: true
+        draft: false
+        prerelease: false
+        name: PortReleasor ${{ needs.version.outputs.version }}
+        tag_name: ${{ github.ref_name }}
+        body: |
+          ## PortReleasor ${{ needs.version.outputs.version }}
+
+          ### 📦 Downloads
+
+          | Platform | Architecture | File | Size |
+          |----------|-------------|------|------|
+          | Windows | amd64 | `prls-windows-amd64.exe` | ${{ steps.sizes.outputs.win_amd64 }} |
+          | Windows | arm64 | `prls-windows-arm64.exe` | ${{ steps.sizes.outputs.win_arm64 }} |
+          | macOS | amd64 (Intel) | `prls-darwin-amd64` | ${{ steps.sizes.outputs.darwin_amd64 }} |
+          | macOS | arm64 (Apple Silicon) | `prls-darwin-arm64` | ${{ steps.sizes.outputs.darwin_arm64 }} |
+          | Linux | amd64 | `prls-linux-amd64` | ${{ steps.sizes.outputs.linux_amd64 }} |
+          | Linux | arm64 | `prls-linux-arm64` | ${{ steps.sizes.outputs.linux_arm64 }} |
+
+          ### 🔐 Verification
+
+          Download the `.sha256`, `.md5`, or `.sha512` files to verify integrity:
+
+          ```bash
+          # 验证 SHA256
+          sha256sum -c prls-linux-amd64.sha256
+          
+          # 验证 MD5
+          md5sum -c prls-linux-amd64.md5
+          
+          # 验证 SHA512
+          sha512sum -c prls-linux-amd64.sha512
