@@ -16,6 +16,7 @@ import (
 // WindowsManager Windows平台实现
 type WindowsManager struct {
 	processNameCache map[int]string
+	processPathCache map[int]string
 }
 
 // Windows API 相关常量和结构体
@@ -43,12 +44,16 @@ func (wm *WindowsManager) initProcessCache() {
 	if wm.processNameCache == nil {
 		wm.processNameCache = make(map[int]string)
 	}
+	if wm.processPathCache == nil {
+		wm.processPathCache = make(map[int]string)
+	}
 }
 
-// getAllProcessNames 批量获取所有进程名称
-func (wm *WindowsManager) getAllProcessNames() error {
+// getAllProcessInfo 批量获取所有进程信息（名称和路径）
+func (wm *WindowsManager) getAllProcessInfo() error {
 	wm.initProcessCache()
 
+	// 使用tasklist获取进程名称和PID
 	cmd := exec.Command("tasklist", "/FO", "CSV", "/NH")
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -74,13 +79,40 @@ func (wm *WindowsManager) getAllProcessNames() error {
 		}
 	}
 
+	// 使用wmic获取进程路径信息
+	cmd2 := exec.Command("wmic", "process", "get", "ProcessId,ExecutablePath", "/format:csv")
+	var out2 bytes.Buffer
+	cmd2.Stdout = &out2
+
+	if err := cmd2.Run(); err != nil {
+		// wmic失败时不影响进程名称获取，只返回警告
+		return nil
+	}
+
+	lines2 := strings.Split(out2.String(), "\n")
+	for _, line := range lines2 {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Node") {
+			continue
+		}
+
+		fields := strings.Split(line, ",")
+		if len(fields) >= 2 {
+			path := strings.Trim(fields[1], "\"")
+			pidStr := strings.Trim(fields[2], "\"")
+			if pid, err := strconv.Atoi(pidStr); err == nil && path != "" {
+				wm.processPathCache[pid] = path
+			}
+		}
+	}
+
 	return nil
 }
 // GetPortConnections 获取Windows系统端口连接信息
 func (wm *WindowsManager) GetPortConnections() ([]types.PortInfo, error) {
 	// 首先批量获取所有进程信息
-	if err := wm.getAllProcessNames(); err != nil {
-		return nil, fmt.Errorf("failed to get process names: %v", err)
+	if err := wm.getAllProcessInfo(); err != nil {
+		return nil, fmt.Errorf("failed to get process info: %v", err)
 	}
 
 	cmd := exec.Command("netstat", "-ano")
@@ -147,6 +179,7 @@ func (wm *WindowsManager) GetPortConnections() ([]types.PortInfo, error) {
 		}
 
 		processName := wm.getProcessNameFromCache(pid)
+		processPath := wm.getProcessPathFromCache(pid)
 		key := fmt.Sprintf("%d:%s", port, protocol)
 
 		// 创建新的端口信息
@@ -155,6 +188,7 @@ func (wm *WindowsManager) GetPortConnections() ([]types.PortInfo, error) {
 			Protocol:    protocol,
 			PID:         pid,
 			ProcessName: processName,
+			ProcessPath: processPath,
 			LocalAddr:   localAddr,
 			State:       state,
 		}
@@ -187,6 +221,15 @@ func (wm *WindowsManager) getProcessNameFromCache(pid int) string {
 		return name
 	}
 	return "Unknown"
+}
+
+// getProcessPathFromCache 从缓存获取进程路径
+func (wm *WindowsManager) getProcessPathFromCache(pid int) string {
+	wm.initProcessCache()
+	if path, exists := wm.processPathCache[pid]; exists {
+		return path
+	}
+	return ""
 }
 func (wm *WindowsManager) getProcessName(pid int) string {
 	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
